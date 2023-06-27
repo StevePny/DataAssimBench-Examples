@@ -39,6 +39,8 @@ class RCModel():
         random_seed (int): Random seed for random number generation. Default
             is 1.
 
+        s (ndarray): Model states over entire time series.
+        s_last (ndarray): Last
         ybar (ndarray): y.T @ st, set in _compute_Wout.
         sbar (ndarray): st.T @ st, set in _compute_Wout.
         A (ndarray): reservoir adjacency weight matrix, set in
@@ -163,7 +165,7 @@ class RCModel():
         self.Win = Win
         self.Adense = A.asformat('array') if self.sparse_adj_matrix else A
 
-    def generate(self, u, A=None, Win=None, r0=None):
+    def generate(self, u, A=None, Win=None, r0=None, save_states=False):
         """generate reservoir time series from input signal u
         Args:
             u (array_like): (time_dimension, system_dimension), input signal to
@@ -173,8 +175,11 @@ class RCModel():
             Win (array_like, optional): (reservoir_dim, system_dimension),
                 reservoir input weight matrix
             r0 (array_like, optional): (reservoir_dim,) initial reservoir state
+            save_states (bool): If True, saves reservoir states as self.states.
+                If False, returns states. Default: False.
+
         Returns:
-            r (array_like): (reservoir_dim, time_dimension), reservoir state
+            r (array_like): (time_dim, reservoir_dim), reservoir state
         """
         r = np.zeros((u.shape[0], self.reservoir_dim))
 
@@ -187,7 +192,10 @@ class RCModel():
         for t in range(0, u.shape[0]):
             r[t, :] = self.update(r[t - 1], u[t - 1, :], A, Win)
 
-        return r
+        if save_states:
+            self.states = r
+        else:
+            return r
 
     def update(self, r, u, A=None, Win=None):
         """Update reservoir state with input signal and previous state
@@ -245,7 +253,7 @@ class RCModel():
             u = state_vec.values[jnp.arange(initial_index-spinup_steps,
                                             initial_index)
                                  ]
-            r = self.generate(u, r0=r0)
+            r = self.generate(u, r0=r0, save_states=False)
             r0 = r[-1, ]
         else:
             r0 = None
@@ -366,10 +374,11 @@ class RCModel():
             Wout (array_like): Trained output weight matrix
         """
 
-        r = self.s_last[:, :]
+        if self.states is None:
+            self.generate(data_obj.values, save_states=True)
+        r = self.states[:, :]
         u = data_obj.values[:, :]
         self.Wout = self._compute_Wout(r, u, update_Wout=update_Wout, u=u.T)
-
 
     def _compute_Wout(self, rt, y, update_Wout=True, u=None):
         """Solve linear system with multiple RHS for readout weight matrix
