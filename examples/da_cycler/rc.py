@@ -16,70 +16,75 @@ class RCModel():
     """Class for a simple Reservoir Computing data-driven model
 
     Attributes:
-        system_dim (int): dimension of the underlying dynamical system
-        time_dim (int): the dimension of the timeseries
-        sparsity (float): the percentage of zero-valued entries in A.
-            Default: 0.99
-        reservoir_dim (int):
-        input_dim (int):
-        sigma_bias: 1
-        leak_rate,
+        system_dim (int): Dimension of reservoir output.
+        input_dim (int): Dimension of reservoir input signal.
+        reservoir_dim (int): Dimension of reservoir state. Default: 512.
 
+        sparsity (float): the percentage of zero-valued entries in the
+            adjacency matrix (A). Default: 0.99.
+        sparse_adj_matrix (bool): If True, A is computed using scipy sparse.
+        sigma (float): Scaling of the input weight matrix. Default: 0.5.
+        sigma_bias (float): Bias term for sigma. Default: 0.
+        leak_rate (float): ``(1-leak_rate)`` of the reservoir state at the
+            previous time step is incorporated during timestep update.
+            Default: 1.
+        spectral_radius (float): Scaling of the reservoir adjacency
+            matrix. Default: 0.9.
+        tikhonov_parameter (float): Regularization parameter in the linear
+            solving, penalizing amplitude of weight matrix elements. Default: 0.0.
+        readout_method (str): How to handle reservoir state elements during
+            readout. One of 'linear', 'biased', or 'quadratic'.
+            Default: 'linear'.
 
-        A (array_like): reservoir adjacency weight matrix, set in ``.build()``
-        Win (array_like): reservoir input weight matrix, set in ``.build()``
-        Wout (array_like): trained output weight matrix, set in ``.train()``
+        random_seed (int): Random seed for random number generation. Default
+            is 1.
+
+        ybar (ndarray): y.T @ st, set in _compute_Wout.
+        sbar (ndarray): st.T @ st, set in _compute_Wout.
+        A (ndarray): reservoir adjacency weight matrix, set in
+            ``.weights_init()``.
+        Win (ndarray): reservoir input weight matrix, set in
+            ``.weights_init()``.
+        Wout (ndarray): trained output weight matrix, set in ``.train()``.
     """
 
     def __init__(self,
                  system_dim,
-                 reservoir_dim,
                  input_dim,
-                 time_dim=None,
-                 num_layers=1,
-                 num_groups=1,
-                 local_size=None,
-                 local_halo=0,
-                 batch_size=None,
-                 sparsity=0.95,
+                 reservoir_dim=512,
+                 sparsity=0.99,
                  sparse_adj_matrix=False,
-                 random_seed=1,
+                 sigma=0.5,
                  sigma_bias=0,
-                 sigma=1,
                  leak_rate=1.0,
-                 spectral_radius=1,
-                 readout_method='linear',
-                 training_method='pinv',
-                 ybar=0,
-                 sbar=0,
+                 spectral_radius=0.9,
                  tikhonov_parameter=0,
+                 readout_method='linear',
+                 random_seed=1,
                  **kwargs):
 
         self.system_dim = system_dim
-        self.reservoir_dim = reservoir_dim
         self.input_dim = input_dim
-        self.time_dim = time_dim
-        self.num_layers = num_layers
-        self.num_groups = num_groups
-        self.local_size = local_size
-        self.local_halo = local_halo
-        self.batch_size = batch_size
+        self.reservoir_dim = reservoir_dim
+
         self.sparsity = sparsity
         self.sparse_adj_matrix = sparse_adj_matrix
-        self.spectral_radius = spectral_radius
-        self.sigma_bias = sigma_bias
         self.sigma = sigma
+        self.sigma_bias = sigma_bias
+        self.spectral_radius = spectral_radius
         self.leak_rate = leak_rate
+
         if readout_method not in ['linear', 'biased', 'quadratic']:
             raise ValueError(
                 'readout_method must be one of: "linear", "biased", or '
                 '"quadratic". \n Got {} instead. Default is "linear".'.format(
                     readout_method))
         self.readout_method = readout_method
-        self.ybar = ybar
-        self.sbar = sbar
         self.tikhonov_parameter = tikhonov_parameter
-        self.training_method = training_method
+
+        self.ybar = 0
+        self.sbar = 0
+
         self._random_num_generator = np.random.default_rng(random_seed)
 
     def weights_init(self):
@@ -89,8 +94,8 @@ class RCModel():
             Generate the random adjacency (A) and input weight matrices (Win)
             with sparsity determined by ``sparsity`` attribute,
             scaled by ``spectral_radius`` and ``sigma`` parameters,
-            respectively. If density of A is <=0.2, then use scipy sparse
-            matrices for computational speed up
+            respectively. If sparse_adj_matrix is True, then use scipy sparse
+            matrices for computational speed up.
 
         Sets Attributes:
             A (array_like): (reservoir_dim, reservoir_dim),
@@ -339,7 +344,6 @@ class RCModel():
         for t in range(n_samples - 1):
             s = s.at[t + 1].set(self.update(s[t, :], y[t, :], A, Win))
             y = y.at[t + 1].set(self.readout(s[t + 1, :], Wout, utm1=y[t, :]))
-        print(y.shape)
 
         y_obj = vector.StateVector(
             system_dim=y.shape[1],
@@ -356,7 +360,7 @@ class RCModel():
         Args:
             dataobj (Data): Data object containing training data
             update_Wout (bool): if True, update Wout, otherwise
-                initialize it by rewriting the toolkit's ybar and sbar matrices
+                initialize it by rewriting the ybar and sbar matrices
 
         Sets Attributes:
             Wout (array_like): Trained output weight matrix
@@ -420,8 +424,8 @@ class RCModel():
                 (self.sbar
                  + self.tikhonov_parameter
                  * np.eye(self.sbar.shape[0])),
-                self.ybar,
-                method=self.training_method)
+                self.ybar)
+        
 
         # These are from the old update_Wout method,
         # although I'm not sure what they're for
@@ -440,8 +444,8 @@ class RCModel():
             Y (matrix) : dependent variable
             beta (float): Tikhonov regularization
         '''
-
         A = self._linsolve_pinv(X, Y, beta)
+
         return A.T
 
     def _linsolve_pinv(self, X, Y, beta=None):
@@ -456,7 +460,6 @@ class RCModel():
             Xinv = linalg.pinv(X+beta*np.eye(X.shape[0]))
         else:
             Xinv = linalg.pinv(X)
-        print(Y.shape, Xinv.shape)
         A = Y @ Xinv
 
         return A
