@@ -48,7 +48,7 @@ class RCModel():
                  sigma=1,
                  leak_rate=1.0,
                  spectral_radius=1,
-                 readout_method='quadratic',
+                 readout_method='linear',
                  training_method='pinv',
                  ybar=0,
                  sbar=0,
@@ -70,6 +70,11 @@ class RCModel():
         self.sigma_bias = sigma_bias
         self.sigma = sigma
         self.leak_rate = leak_rate
+        if readout_method not in ['linear', 'biased', 'quadratic']:
+            raise ValueError(
+                'readout_method must be one of: "linear", "biased", or '
+                '"quadratic". \n Got {} instead. Default is "linear".'.format(
+                    readout_method))
         self.readout_method = readout_method
         self.ybar = ybar
         self.sbar = sbar
@@ -99,38 +104,23 @@ class RCModel():
         # Create adjacency weight matrix that defines reservoir dynamics
         # Dense version
         if not self.sparse_adj_matrix:
-            # initialize weights with a random matrix centered around zero:
+            # Initialize weights with a random matrix centered around zero:
             A = (self._random_num_generator.random(
                     (self.reservoir_dim, self.reservoir_dim))
                  - 0.5)
 
-            # delete the fraction of connections given by (self.sparsity):
+            # Delete the fraction of connections given by (self.sparsity):
             A[self._random_num_generator.random(A.shape) < self.sparsity] = 0
 
-            # compute the spectral radius of self.Win, u) these weights:
-#             try:
+            # Compute the spectral radius of self.Win
             radius = np.max(np.abs(np.linalg.eigvals(A)))
-#             except:
-#                 # This approach for getting the leading eigenvalue is supported
-#                 # by cupy:
-#                 # ISSUE: this is incorrect
-#                 #       replace with appropriate method for cupy implementation
-#                 _, R = np.linalg.qr(A)
-#                 radius = np.abs(R[0, 0])
-#                 raise Exception('ERROR: unsupported method for finding leading'
-#                                 ' eigenvalue.')
 
-            # rescale the adjacencey matrix to reach the requested spectral
-            # radius:
+            # Rescale the adjacencey matrix to the requested spectral radius
             A = A * (self.spectral_radius / radius)
 
+        # Sparse version
         else:
-            # ---------------------- #
-            # --- Sparse version --- #
-            # ---------------------- #
-
-            # stats.uniform(loc,scale) specifies uniform between [loc,
-            # loc+scale]
+            # Uniform dsit between [loc, loc+scale]
             uniform = stats.uniform(-1.0, 2.)
             uniform.random_state = self._random_num_generator
             A = sparse.random(self.reservoir_dim, self.reservoir_dim,
@@ -144,7 +134,8 @@ class RCModel():
             except sparse.linalg.ArpackNoConvergence as err:
                 k = len(err.eigenvalues)
                 if k <= 0:
-                    raise AssertionError("Spurious no-eigenvalues-found case")
+                    raise AssertionError(
+                            "Spurious no-eigenvalues-found case") from err
                 eig = err.eigenvalues
 
             radius = np.max(np.abs(eig))
@@ -167,45 +158,46 @@ class RCModel():
         self.Win = Win
         self.Adense = A.asformat('array') if self.sparse_adj_matrix else A
 
-
     def generate(self, u, A=None, Win=None, r0=None):
         """generate reservoir time series from input signal u
         Args:
-            u (array_like): (time_dimension, system_dimension), input signal to reservoir
+            u (array_like): (time_dimension, system_dimension), input signal to
+                reservoir
             A (array_like, optional): (reservoir_dim, reservoir_dim),
-                                      reservoir adjacency matrix
+                reservoir adjacency matrix
             Win (array_like, optional): (reservoir_dim, system_dimension),
-                                        reservoir input weight matrix
+                reservoir input weight matrix
             r0 (array_like, optional): (reservoir_dim,) initial reservoir state
         Returns:
             r (array_like): (reservoir_dim, time_dimension), reservoir state
         """
-
         r = np.zeros((u.shape[0], self.reservoir_dim))
 
         if r0 is not None:
-            logging.debug('generate:: using initial reservoir state: {}'.format(r0))
+            logging.debug(
+                    'generate:: using initial reservoir state: %s', r0)
             r[0, :] = np.reshape(r0, (1, self.reservoir_dim))
 
-        # encoding input signal {u(t)} -> {s(t)}
-#         for t in range(0, u.shape[0]):
-        for t in range(1, u.shape[0]):
+        # Encoding input signal {u(t)} -> {s(t)}
+        for t in range(0, u.shape[0]):
             r[t, :] = self.update(r[t - 1], u[t - 1, :], A, Win)
 
         return r
 
-
     def update(self, r, u, A=None, Win=None):
-        """update reservoir state with input signal and reservoir state at previous time step
+        """Update reservoir state with input signal and previous state
+
         Args:
-            r (array_like): (reservoir_dim,) reservoir state
+            r (array_like): (reservoir_dim,) Previous reservoir state
             u (array_like): (input_dimension,) input signal
             A (array_like, optional): (reservoir_dim, reservoir_dim),
-                reservoir adjacency matrix
+                reservoir adjacency matrix. If None, uses self.A. Default
+                is None.
             Win (array_like, optional): (reservoir_dim, input_dimension),
-                reservoir input weight matrix
+                reservoir input weight matrix. If None, uses self.Win.
+                Default is None
         Returns:
-            q (array_like): (reservoir_dim,) reservoir state at the next time step
+            q (array_like): (reservoir_dim,) Reservoir state at next time step
         """
 
         if A is None:
@@ -216,34 +208,38 @@ class RCModel():
         try:
             if self.sigma_bias != 0:
                 u = jnp.concatenate(([1.0], u))
-            p = A @ r.T + Win @ u # transposed r
+            p = A @ r.T + Win @ u
             q = self.leak_rate * jnp.tanh(p) + (1 - self.leak_rate) * r
-
-        except:
-            print('A.shape = {}, s.shape = {}, Win.shape = {}, u.shape = {}'.format(A.shape, r.shape, Win.shape, u.shape))
-            raise Exception('Likely dimension mismatch.')
+        except TypeError as err:
+            print('A.shape = {}, s.shape = {}, Win.shape = {}, u.shape = {}'
+                  ''.format(A.shape, r.shape, Win.shape, u.shape))
+            raise Exception('Likely dimension mismatch.') from err
 
         return q
-        
 
-    def predict(self, state_vec, delta_t, initial_index = 0, n_steps=100, spinup_steps=0,
-                r0=None, keep_spinup=True):
+    def predict(self, state_vec, delta_t, initial_index=0, n_steps=100,
+                spinup_steps=0, r0=None, keep_spinup=True):
         """Compute the prediction phase of the RC
+
         Args:
             dataobj (Data): data object containing the initial conditions
-            initial_index (int, optional): time index of initial conditions in the data object 'values'
+            initial_index (int, optional): time index of initial conditions in
+                the data object 'values'
             n_steps (int, optional): number of steps to conduct the prediction
-            spinup_steps (int, optional): number of steps before the initial_index to use for spinning up the reservoir state
+            spinup_steps (int, optional): number of steps before the
+                initial_index to use for spinning up the reservoir state
             r0 (array_like, optional): initial reservoir state
+
         Returns:
-            dataobj_pred (Data): Data object covering prediction period
-        Todo:
-            change steps to n_steps
+            dataobj_pred (vector.StateVector): StateVector object covering
+                prediction period
         """
 
         # Recompute the initial reservoir spinup to get reservoir states
-        if (spinup_steps > 0):
-            u = state_vec.values[jnp.arange(initial_index-spinup_steps, initial_index)]
+        if spinup_steps > 0:
+            u = state_vec.values[jnp.arange(initial_index-spinup_steps,
+                                            initial_index)
+                                 ]
             r = self.generate(u, r0=r0)
             r0 = r[-1, ]
         else:
@@ -255,22 +251,20 @@ class RCModel():
             r_last = state_vec.values[initial_index-1:, :]
 
         u_last = state_vec.values[max(initial_index-1, 0), :]
-#         u_last = state_vec.values[max(initial_index-1, 0), :]
 
         # Use these if possible
         A = getattr(self, 'A', None)
         Win = getattr(self, 'Win', None)
-        predicted_values = self._predict_backend(n_steps, r_last.T, u_last.T, delta_t,
-                                                A=A, Win=Win)
+        predicted_values = self._predict_backend(n_steps, r_last.T, u_last.T,
+                                                 delta_t, A=A, Win=Win)
 
-#         data_obj_pred.values[initial_index:initial_index+n_steps, :] = predicted_values.values
-        out_vec = vector.StateVector(values=predicted_values.values, store_as_jax=True)
+        out_vec = vector.StateVector(
+                values=predicted_values.values, store_as_jax=True)
 
         if not keep_spinup:
             out_vec.values = out_vec.values[initial_index:]
 
         return out_vec
-
 
     def readout(self, rt, Wout=None, utm1=None):
         """use Wout to map reservoir state to output
@@ -287,45 +281,52 @@ class RCModel():
         Todo:
             generalize similar to DiffRC
         """
-
-        if (Wout is None):
+        if Wout is None:
             Wout = self.Wout
 
         # necessary to copy in order to not
         # assign input reservoir state in place
-        if self.readout_method=='quadratic':
+        if self.readout_method == 'quadratic':
             st = deepcopy(rt)
-            st =  st.at[...,1::2].set(st[...,1::2]**2)
+            st = st.at[..., 1::2].set(st[..., 1::2]**2)
         elif self.readout_method == 'biased':
-            assert(utm1 is not None)
+            assert utm1 is not None
             if rt.ndim > 1:
-                st = jnp.concatenate((jnp.ones((rt.shape[0], 1)), utm1, rt), axis=1)
+                st = jnp.concatenate((jnp.ones((rt.shape[0], 1)), utm1, rt),
+                                     axis=1)
             else:
                 st = jnp.concatenate(([1.0], utm1, rt))
+        # linear
         else:
             st = rt
 
         try:
-            vt = st @ Wout #.T
+            vt = st @ Wout
         except TypeError:
-            print('st.shape = {}, Wout.shape = {}'.format(st.shape,Wout.shape))
+            print('st.shape = {}, Wout.shape = {}'.format(
+                st.shape, Wout.shape))
             raise
 
         return vt
 
     def _predict_backend(self, n_samples, s_last, u_last, delta_t,
-                A=None, Win=None, Wout=None):
-        """
-        Apply the learned weights to new input.
+                         A=None, Win=None, Wout=None):
+        """Apply the learned weights to new input.
+
         Args:
             n_samples (int): number of time steps to predict
-            s_last (array_like): 1D vector with final reservoir state before prediction
-            u_last (array_like): 1D vector with final input signal before prediction
+            s_last (array_like): 1D vector with final reservoir state before
+                prediction.
+            u_last (array_like): 1D vector with final input signal before
+                prediction.
             delta_t (float): full time length of spinup and prediction windows
             A (array_like, optional): (reservoir_dim, reservoir_dim),
-                adjacency matrix
+                adjacency matrix. If None, uses self.A. Default is None.
             Win (array_like, optional): (reservoir_dim, input_dimension),
-                input weight matrix
+                input weight matrix. If None, uses self.Win.
+                Default is None.
+            Wout (array_like, optional): Rutput weight matrix. If None,
+                uses self.Wout. Default is None.
         Returns:
             y (Data): data object with predicted signal from reservoir
         """
@@ -333,11 +334,11 @@ class RCModel():
         s = jnp.zeros((n_samples, self.reservoir_dim))
         y = jnp.zeros((n_samples, self.system_dim))
         s = s.at[0].set(self.update(s_last, u_last, A, Win))
-        y = y.at[0].set(self.readout( s[0, :], Wout, utm1=u_last ))
+        y = y.at[0].set(self.readout(s[0, :], Wout, utm1=u_last))
 
         for t in range(n_samples - 1):
             s = s.at[t + 1].set(self.update(s[t, :], y[t, :], A, Win))
-            y = y.at[t + 1].set(self.readout( s[t + 1, :], Wout , utm1=y[t, :]))
+            y = y.at[t + 1].set(self.readout(s[t + 1, :], Wout, utm1=y[t, :]))
         print(y.shape)
 
         y_obj = vector.StateVector(
@@ -349,25 +350,26 @@ class RCModel():
 
         return y_obj
 
-
     def train(self, data_obj, update_Wout=True):
-        """
-        Train the localized RC model
+        """Train the localized RC model
+
         Args:
             dataobj (Data): Data object containing training data
             update_Wout (bool): if True, update Wout, otherwise
                 initialize it by rewriting the toolkit's ybar and sbar matrices
+
         Sets Attributes:
             Wout (array_like): Trained output weight matrix
         """
 
-        r = self.state[:, :]
-        u = data_obj.values[:,  :]
+        r = self.s_last[:, :]
+        u = data_obj.values[:, :]
         self.Wout = self._compute_Wout(r, u, update_Wout=update_Wout, u=u.T)
 
 
     def _compute_Wout(self, rt, y, update_Wout=True, u=None):
-        """solve linear system with multiple RHS for readout weight matrix
+        """Solve linear system with multiple RHS for readout weight matrix
+
         Args:
             rt (array_like): 2D with dims (time_dim, reservoir_dim),
                 reservoir state
@@ -375,47 +377,62 @@ class RCModel():
                 target reservoir output
             update_Wout (bool): if True, update Wout, otherwise,
                 initialize it by rewriting the ybar and sbar matrices
+
         Returns:
             Wout (array_like): 2D with dims (output_dim, reservoir_dim),
                 this is also stored within the object
+
         Sets Attributes:
-            ybar (array_like): y.T @ st, st is rt with readout_method accounted for
-            sbar (array_like): st.T @ st, st is rt with readout_method accounted for
-            Wout (array_like): see Returns
-            y_last, s_last, u_last (array_like): the last element of output, reservoir, and input states
+            ybar (array_like): y.T @ st, st is rt with readout_method accounted
+                for.
+            sbar (array_like): st.T @ st, st is rt with readout_method
+                accounted for.
+            Wout (array_like): see Returns.
+            y_last, s_last, u_last (array_like): the last element of output,
+                reservoir, and input states
         """
         # Prepare for nonlinear readout function:
         # necessary to copy in order to not
         # assign input reservoir state in place
-        if (self.readout_method == 'quadratic'):
+        if self.readout_method == 'quadratic':
             st = deepcopy(rt)
             st[...,  1::2] = st[..., 1::2]**2
         elif self.readout_method == 'biased':
-            assert(u is not None)
-            st = np.concatenate((np.ones((rt.shape[0]-1, 1)), u[:-1, :], rt[1:, :]), axis=1)
+            assert u is not None
+            st = np.concatenate(
+                    (np.ones((rt.shape[0]-1, 1)), u[:-1, :], rt[1:, :]),
+                    axis=1)
             y = y[1:]
         else:
             st = rt
 
-        # learn the weights by solving for final layer weights Wout analytically
-        # (this is actually a linear regression, a no-hidden layer neural network with the identity activation function)
-        self.ybar = self.ybar + np.dot(y.T, st)  if update_Wout else np.dot(y, st)
-        self.sbar = self.sbar + np.dot(st.T, st) if update_Wout else np.dot(st.T,st)
+        # Learn weights by solving for final layer weights Wout analytically
+        # (this is actually a linear regression, a no-hidden layer neural
+        #  network with the identity activation function)
+        if update_Wout:
+            self.ybar = self.ybar + np.dot(y.T, st)
+            self.sbar = self.sbar + np.dot(st.T, st)
+        else:
+            self.ybar = y @ st  # Changed from np.dot
+            self.sbar = st.T @ st  # Changed from np.dot
 
-        self.Wout = self._linsolve(self.sbar+self.tikhonov_parameter*np.eye(self.sbar.shape[0]),
-                             self.ybar,
-                             method=self.training_method)
+        self.Wout = self._linsolve(
+                (self.sbar
+                 + self.tikhonov_parameter
+                 * np.eye(self.sbar.shape[0])),
+                self.ybar,
+                method=self.training_method)
 
         # These are from the old update_Wout method,
         # although I'm not sure what they're for
-        self.y_last = y[-1,...]
-        self.s_last = rt[-1,...]
+        self.y_last = y[-1, ...]
+        self.s_last = rt[-1, ...]
         if u is not None:
-            self.u_last = u[-1,...]
+            self.u_last = u[-1, ...]
 
         return self.Wout
 
-    def _linsolve(self, X, Y, beta = None, **kwargs):
+    def _linsolve(self, X, Y, beta=None, **kwargs):
         '''Linear solver wrapper
         Solve for A in Y = AX
         Args:
@@ -427,7 +444,7 @@ class RCModel():
         A = self._linsolve_pinv(X, Y, beta)
         return A.T
 
-    def _linsolve_pinv(self, X, Y, beta = None):
+    def _linsolve_pinv(self, X, Y, beta=None):
         """Solve for A in Y = AX, assuming X and Y are known.
         Args:
           X : independent variable, square matrix
