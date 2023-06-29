@@ -251,32 +251,34 @@ class RCModel():
 
         # Recompute the initial reservoir spinup to get reservoir states
         if spinup_steps > 0:
-            u = state_vec.values[jnp.arange(initial_index-spinup_steps,
-                                            initial_index)
-                                 ]
+            u = state_vec.values[(initial_index-spinup_steps):initial_index]
             r = self.generate(u, r0=r0, save_states=False)
             r0 = r[-1, ]
-        else:
-            r0 = None
 
         if r0 is not None:
-            r_last = r0
+            s_last = r0
         else:
-            r_last = state_vec.values[initial_index-1:, :]
+            s_last = self.states[initial_index-1]
 
         u_last = state_vec.values[max(initial_index-1, 0), :]
 
         # Use these if possible
         A = getattr(self, 'A', None)
         Win = getattr(self, 'Win', None)
-        predicted_values = self._predict_backend(n_steps, r_last.T, u_last.T,
-                                                 delta_t, A=A, Win=Win)
+        predicted_obj = self._predict_backend(n_steps, s_last.T, u_last.T,
+                                              delta_t, A=A, Win=Win)
+
+        if keep_spinup and spinup_steps > 0:
+            predicted_values = jnp.concatenate([u, predicted_obj.values])
+            predicted_times = state_vec.times
+        else:
+            predicted_values = predicted_obj.values
+            predicted_times = state_vec.times[initial_index:]
 
         out_vec = vector.StateVector(
-                values=predicted_values.values, store_as_jax=True)
-
-        if not keep_spinup:
-            out_vec.values = out_vec.values[initial_index:]
+                values=predicted_values,
+                times=predicted_times,
+                store_as_jax=True)
 
         return out_vec
 
