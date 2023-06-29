@@ -194,6 +194,7 @@ class RCModel():
 
         if save_states:
             self.states = r
+            self.s_last = r[-1]
         else:
             return r
 
